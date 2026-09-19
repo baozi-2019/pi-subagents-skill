@@ -4,6 +4,8 @@
 输入 `/swarm <任务>`，父代理自动把任务分解为有边界的多条子代理通道，
 并行/分阶段派发、回收并汇总交付。
 
+仓库地址：`git@github.com:baozi-2019/pi-subagents-skill.git`
+
 ## 组成
 
 ```text
@@ -22,7 +24,7 @@
 前置条件：已安装 `pi-subagents` 包（提供 `subagent` 工具与各内置 agent）。
 
 ```bash
-# 方式一：git 远程安装（推荐，远程仓库创建后）
+# 方式一：git 远程安装（推荐）
 pi install git:github.com/baozi-2019/pi-subagents-skill
 
 # 方式二：本地路径安装（写入 ~/.pi/agent/settings.json）
@@ -46,6 +48,18 @@ ln -s "$PWD/prompts/swarm.md" ~/.pi/agent/prompts/swarm.md
 全部通道完成后由父代理交叉核对、仲裁冲突、统一验收交付。
 
 也可以直接 `/skill:swarm <任务>` 触发同一 skill。
+
+## 更新
+
+git 方式安装的包（未固定 `@ref`）用以下命令拉取远程最新提交：
+
+```bash
+pi update git:github.com/baozi-2019/pi-subagents-skill   # 只更新本包
+pi update --extensions                                   # 更新全部已安装的包
+```
+
+更新后需新开 pi 会话才会加载新版 skill。
+注意：本地路径与 git 两种方式不要同时安装，同名资源会冲突且只生效先发现的一份。
 
 ## 卸载
 
