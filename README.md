@@ -23,7 +23,7 @@
 
 ```bash
 # 方式一：git 远程安装（推荐，远程仓库创建后）
-pi install git:github.com/<你的用户名>/pi-subagents-skill
+pi install git:github.com/baozi-2019/pi-subagents-skill
 
 # 方式二：本地路径安装（写入 ~/.pi/agent/settings.json）
 pi install /Users/baozi/study/pi-extensions/pi-subagents-skill
@@ -49,6 +49,6 @@ ln -s "$PWD/prompts/swarm.md" ~/.pi/agent/prompts/swarm.md
 ## 卸载
 
 ```bash
-pi remove git:github.com/<你的用户名>/pi-subagents-skill   # 或本地路径安装时的对应来源
+pi remove git:github.com/baozi-2019/pi-subagents-skill   # 或本地路径安装时的对应来源
 # 方式三安装则删除上述两个软链
 ```
