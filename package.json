@@ -1,0 +1,12 @@
+{
+  "name": "pi-subagents-skill",
+  "version": "0.1.0",
+  "description": "Swarm skill for pi: /swarm <任务> 自动分解并并行派发 pi-subagents 子代理",
+  "type": "module",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "pi": {
+    "skills": ["./skills/swarm"],
+    "prompts": ["./prompts/swarm.md"]
+  }
+}
