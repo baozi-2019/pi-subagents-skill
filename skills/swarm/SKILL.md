@@ -42,12 +42,40 @@ description: |
 
 - **按接缝拆分**：不同模块/目录/调研角度/验收维度各成一条通道，每条有独立的
   证据来源或修改范围；禁止只换序号的克隆提示词。
+- **先判定能否并行实现**：只有当通道拥有互不重叠的文件集合或稳定的契约边界，且
+  一条通道的中间结果不会改变另一条通道的实现前提时，才并行派发可写 worker。
+  共享接口、同一文件、同一迁移序列或存在先后依赖时，先并行只读调研，再由父代理
+  重写任务包并串行实现；不要用 worktree 掩盖语义冲突。
 - 常见可并行维度：不同子系统、侦察 vs 实现 vs 审查、不同文件集合、
   不同假设方案的对照验证。
 - 2~4 条通道是常见上限；超出时合并相近通道，不制造并行。
 - 有依赖关系时按"阶段 × 并行"组织：每个阶段内部 `runs.all` 并行，
   阶段之间顺序 await（例如：并行侦察 → 父代理汇总重写任务包 → 并行实现 →
   fresh-context 并行审查）。
+
+## 并行实现与回交协议
+
+并行实现必须让代码真正回到父代理当前工作区，子代理的文字报告不能视为交付完成。
+按以下协议选择实现形态：
+
+1. **可安全并行的实现**：每个 worker 声明唯一的 `claimed files or contract`，使用
+   `worktree: true` 获得独立 worktree；任务包明确禁止 commit/push，并要求返回 changed
+   files、验证命令/结果、未决事项以及运行时提供的 `handoffPath`、`artifactPaths` 或
+   patch 引用。不要让多个 worker 共用一个可写 cwd。
+2. **父代理整合**：所有实现 lane 结束后，父代理按 lane 状态和 handoff 清单逐一检查
+   diff，再把已接受的 patch/变更按顺序应用到自己的当前工作区；每次应用后检查文件归属
+   和冲突。父代理只能整合已完成且证据完整的 lane，不能根据子代理口头描述重写结果。
+3. **整合后验证**：代码进入父代理当前工作区后，父代理必须针对最终合并结果运行受影响
+   范围的 LSP 诊断与构建/测试，并检查最终 diff。子代理在独立 worktree 中通过的命令
+   只能作为 lane 证据，不能替代父代理对最终工作区的验证。
+4. **冲突与失败**：patch 无法应用、lane 失败、worktree 状态不明或验证失败时，保留
+   该 lane 的 worktree 和 handoff，标记为 blocked，停止宣称整体完成；由父代理在清晰的
+   同协议重试、串行修复或向用户升级之间作决定。不得静默切换成另一种执行模式。
+5. **不能安全分片时**：使用“并行只读调研/审查 → 一个 worker 串行实现 → 父代理验证”，
+   这仍然是有效编排；不要为了满足并行字面要求而制造冲突写者。
+
+父代理禁止独自执行任务本体的要求，不阻止父代理做上述 patch 整合、冲突仲裁和最终
+验证；这些步骤是把子代理结果交回主工作区并完成验收的编排收尾。
 
 ## 派发模板
 
@@ -67,20 +95,44 @@ const results = await runs.all([
 return results;
 ```
 
-分阶段（并行侦察 → 并行实现）：
+分阶段（并行侦察 → 并行实现 → 父代理整合与验证）：
 
 ```js
 const scout = await runs.all([
-  { key: "scout-a", agent: "scout", label: "侦察 A", task: "..." },
-  { key: "scout-b", agent: "scout", label: "侦察 B", task: "..." },
+  { key: "scout-a", agent: "scout", phase: "Recon", label: "侦察 A", task: "..." },
+  { key: "scout-b", agent: "scout", phase: "Recon", label: "侦察 B", task: "..." },
 ]);
-// 父代理基于 scout 结果重写实现任务包
+// 父代理基于 scout 结果重写实现任务包，并为每个 worker 分配不重叠的文件/契约边界。
 const impl = await runs.all([
-  { key: "impl-a", agent: "worker", label: "实现 A", task: "...", worktree: true },
-  { key: "impl-b", agent: "worker", label: "实现 B", task: "...", worktree: true },
+  {
+    key: "impl-a",
+    agent: "worker",
+    phase: "Implementation",
+    label: "实现 A",
+    task: "...明确 claimed files or contract；禁止 commit/push；返回 changed files、验证结果和 handoff 引用...",
+    worktree: true,
+    output: "handoff/impl-a.md",
+    outputMode: "file-only",
+  },
+  {
+    key: "impl-b",
+    agent: "worker",
+    phase: "Implementation",
+    label: "实现 B",
+    task: "...明确 claimed files or contract；禁止 commit/push；返回 changed files、验证结果和 handoff 引用...",
+    worktree: true,
+    output: "handoff/impl-b.md",
+    outputMode: "file-only",
+  },
 ]);
-return { scout, impl };
+return impl.map(({ key, runId, outputReference, artifactPaths }) => ({
+  key, runId, outputReference, artifactPaths,
+}));
 ```
+
+脚本返回 handoff 引用后，父代理在脚本外按“检查 lane → 顺序应用 patch → 解决冲突 →
+运行最终 LSP/构建/测试”的顺序收尾；只有最终代码已进入父代理当前工作区并通过验证，才能向
+用户报告实现完成。
 
 约束：
 
@@ -95,17 +147,21 @@ return { scout, impl };
 ## 回收与汇总
 
 - 异步通道有原生完成通知；派发后让出控制权等 Pi 唤醒，不做无谓轮询。
-- 全部通道结束后：交叉核对结果、去重、仲裁冲突；修复与最终验收由**父代理**
-  执行（小规模收尾修改允许父代理直接做）。
+- 全部通道结束后：交叉核对结果、去重、仲裁冲突；对可写 lane，父代理必须先依据
+  `handoffPath` / `artifactPaths` 检查并把已接受的 patch 或变更整合进当前工作区，随后
+  执行最终 LSP 诊断、受影响范围的构建/测试和 diff 检查。修复与最终验收由**父代理**
+  执行；小规模收尾修改允许父代理直接做。
 - 审查类通道必须给出文件:行号证据；无证据的发现不采信。
-- 交付说明必须包含：通道计划与实际执行对照、各通道关键结果、验证方式、
-  残余风险；涉及文档同步时遵循全局 AGENTS.md 第 3 节。
+- 交付说明必须包含：通道计划与实际执行对照、各通道关键结果、代码回交/整合状态、
+  最终验证方式、残余风险；涉及文档同步时遵循全局 AGENTS.md 第 3 节。
 
 ## 红线
 
 - 子代理默认不再派生孙代理；不得擅自下放 fanout。
 - 子代理工作流启动失败属于通道基础设施故障：停下、报告确切失败与
-  run/worktree 状态，不得静默改用其他执行模式兜底。
+  run/worktree 状态，不得静默改用其他执行模式。
+- 可写 lane 的 handoff、patch 或 worktree 状态无法确认时，不得把文字报告当作代码已
+  回交；保留现场并报告阻塞原因。
 - 未获用户明确授权，不执行 `git commit` / `git push`（vault 文档仓库按
   全局规则豁免）。
 - 保持父代理的决策权与发布权；无法仲裁的分歧升级给用户，不擅自拍板。
