@@ -18,6 +18,7 @@ description: |
 
 - 角色与提示词：`skills/pi-subagents/references/prompting-and-roles.md`
 - 执行控制（async、workflowScript 等）：`skills/pi-subagents/references/execution-controls.md`
+- worktree 生命周期与清理能力：`docs/workflows.md`、`docs/tool-reference.md`
 
 也可调用 `subagent({action:"guide",topic:"workflows"})` 获取权威用法。
 
@@ -55,27 +56,66 @@ description: |
 
 ## 并行实现与回交协议
 
-并行实现必须让代码真正回到父代理当前工作区，子代理的文字报告不能视为交付完成。
-按以下协议选择实现形态：
+并行实现必须让代码真正回到**启动子代理前父代理所在的原分支与原工作区**，并清理本次
+隔离执行留下的临时现场；回交、验证、清理全部完成后，才能报告任务完成。
 
-1. **可安全并行的实现**：每个 worker 声明唯一的 `claimed files or contract`，使用
-   `worktree: true` 获得独立 worktree；任务包明确禁止 commit/push，并要求返回 changed
-   files、验证命令/结果、未决事项以及运行时提供的 `handoffPath`、`artifactPaths` 或
-   patch 引用。不要让多个 worker 共用一个可写 cwd。
-2. **父代理整合**：所有实现 lane 结束后，父代理按 lane 状态和 handoff 清单逐一检查
-   diff，再把已接受的 patch/变更按顺序应用到自己的当前工作区；每次应用后检查文件归属
-   和冲突。父代理只能整合已完成且证据完整的 lane，不能根据子代理口头描述重写结果。
-3. **整合后验证**：代码进入父代理当前工作区后，父代理必须针对最终合并结果运行受影响
-   范围的 LSP 诊断与构建/测试，并检查最终 diff。子代理在独立 worktree 中通过的命令
-   只能作为 lane 证据，不能替代父代理对最终工作区的验证。
-4. **冲突与失败**：patch 无法应用、lane 失败、worktree 状态不明或验证失败时，保留
-   该 lane 的 worktree 和 handoff，标记为 blocked，停止宣称整体完成；由父代理在清晰的
-   同协议重试、串行修复或向用户升级之间作决定。不得静默切换成另一种执行模式。
-5. **不能安全分片时**：使用“并行只读调研/审查 → 一个 worker 串行实现 → 父代理验证”，
-   这仍然是有效编排；不要为了满足并行字面要求而制造冲突写者。
+0. **记录原现场**：派发前记录仓库根目录 `originalCwd`、完整分支引用 `originalBranch`
+   （用 `git symbolic-ref --quiet HEAD` 获取，不能假定为 main/master）、`originalHead`、
+   工作区/暂存区状态和 `git worktree list --porcelain`。detached HEAD 时先确认目标分支。
+   使用 managed worktree 前检查源工作区干净；有既有改动时保留并报告阻塞，不擅自
+   stash、commit 或 reset。每条 lane 分配后记录实际 worktree 路径、临时分支和本次
+   新建的临时产物清单，清理范围以运行时 handoff 与该清单交叉核实。
+1. **可安全并行的实现**：隔离可用 `worktree: true`；并行可写 worker 必须使用独立
+   worktree，每个 worker 声明唯一的 `claimed files or contract`。任务包包含原分支、
+   原工作区和基线，明确子代理只写自己的工作区、不切换原分支、不自行合并或清理现场，
+   默认禁止 commit/push。返回 changed files、验证结果、未决事项；父代理从运行时
+   结果取得 `artifactPaths` 中的 handoff/patch 引用，不要求子代理猜测运行结束后才生成的路径。
+2. **父代理合并回原分支**：所有实现 lane 结束后，父代理在 `originalCwd` 核实当前分支
+   仍为 `originalBranch`，并比对 HEAD 与原有改动；发生意外切换或外部改动时先核对，
+   不向当时恰好所在的其他分支应用结果，不自动切换覆盖用户现场。逐一检查 handoff、
+   patch 的范围和完整性（包括新增、删除、重命名、二进制与未跟踪源码），按依赖顺序
+   应用已接受的变更，每个 patch 先 `git apply --check` 再应用，解决冲突后检查最终 diff。
+   默认通过 patch 把代码合入原分支的工作区，保留为未提交变更；只有另获提交授权时才
+   使用会创建提交的 Git merge/cherry-pick。必须把原分支作为最终交付位置，不能只留下
+   子分支、worktree 或 patch，也不能根据子代理口头描述重写成果。
+3. **原分支验证**：父代理在 `originalCwd` 对最终合并结果运行受影响范围的 LSP 诊断与
+   构建/测试，并检查 diff 和原分支身份。子代理 worktree 中通过的命令只是 lane 证据，
+   不能替代最终验证；不适用或无法运行的检查必须说明原因，不能伪称通过。
+4. **清理现场**：原分支变更完整且验证通过后，按下一节删除本次创建的隔离 worktree、
+   临时分支和临时文件/目录，确认无遗留；清理是完成条件，不能仅在交付中建议用户自行做。
+5. **冲突与失败**：lane 失败、合入失败、验证失败或清理失败时，保留尚需恢复的成果和
+   handoff，标记 blocked，列出保留路径、原因和下一步；修复后继续合入、验证和清理。
+   不得为清理而丢弃未整合成果，不得静默切换执行模式，不得报告整体完成。
+6. **不能安全分片时**：使用“并行只读调研/审查 → 一个 worker 串行实现 → 父代理验证”，
+   这仍然是有效编排；使用隔离目录时同样必须回到原分支并清理。
 
-父代理禁止独自执行任务本体的要求，不阻止父代理做上述 patch 整合、冲突仲裁和最终
-验证；这些步骤是把子代理结果交回主工作区并完成验收的编排收尾。
+父代理负责 patch 整合、冲突仲裁、最终验证和清理；这些步骤属于编排收尾。
+
+## worktree 与临时产物清理
+
+- **先核验所有权与成果**：确认 workflow 和全部子代理已终止、无进程/后续步骤占用目标；
+  handoff 对应当前 run，路径和临时分支确为本次新建。把最终变更、验证结果和清理清单
+  摘要保存在隔离目录外。核对每条 lane 的成果均已进入原分支，不能仅凭退出码或报告就删除。
+- **适配运行时自动清理**：pi-subagents 可能在捕获 patch 后已移除 worktree 和临时分支；
+  此时依赖保留的 patch 完成合入，并对照 handoff、Git worktree 列表和文件系统确认已移除，
+  不重复删除。运行时“cleanup complete”不代表代码已合入原分支。
+- **处理残留 worktree**：对尚存在且核验安全的目录，优先采用当前版本支持的清理机制；
+  注意 `worktree.cleanup` 当前仅支持 `mode: "plan"`，计划成功不等于删除完成，不编造
+  `mode: "apply"`。在已授权且完成所有权/成果核验后，可用
+  `git -C "$originalCwd" worktree remove "$laneWorktree"` 移除干净的本次 worktree，
+  再用 `git -C "$originalCwd" branch -d "$laneBranch"` 删除本次临时分支。命令拒绝时
+  重新检查未提交文件、忽略文件及未合并提交；patch 合入不一定建立 Git 祖先关系，
+  不能仅为让 `-d` 成功而制造提交。
+  需要丢弃残留内容时按当前版本的 `worktree.discard` 与权限机制处理，不擅用强制删除绕过检查。
+- **删除本次临时文件**：对照新建清单清理 worktree 目录中的构建产物、缓存、临时报告和
+  本次创建的外部临时目录/文件。worktree 根目录必须由 Git/受支持清理机制移除，不能
+  直接递归删除造成残留注册。只删除核实归属于本次运行的精确路径；符号链接只移除链接，
+  不跟随删除共享依赖或缓存。原工作区、原分支、既有文件、其他任务的 worktree 和正式
+  交付源码均不在删除范围；不使用全仓 `git clean`、宽泛通配符或整个共享 artifacts 目录清扫。
+- **保留必要记录并复核**：恢复不再需要的本次 patch/临时报告可在最终验证与清理摘要保存后
+  删除；保留 runtime 管理的 handoff/receipt/会话记录，遵循其保留机制，不破坏恢复索引。
+  再次检查 `git worktree list --porcelain`、临时分支列表及精确路径是否存在，并在
+  `originalCwd` 核对原分支与最终 diff。存在无法处理的残留时标记清理 blocked，列出具体路径。
 
 ## 派发模板
 
@@ -95,7 +135,7 @@ const results = await runs.all([
 return results;
 ```
 
-分阶段（并行侦察 → 并行实现 → 父代理整合与验证）：
+分阶段（并行侦察 → 并行实现 → 父代理合入原分支、验证与清理）：
 
 ```js
 const scout = await runs.all([
@@ -109,7 +149,7 @@ const impl = await runs.all([
     agent: "worker",
     phase: "Implementation",
     label: "实现 A",
-    task: "...明确 claimed files or contract；禁止 commit/push；返回 changed files、验证结果和 handoff 引用...",
+    task: "...原分支与原工作区、基线、claimed files or contract；禁止 commit/push 与自行合并清理；返回 changed files、验证结果、临时产物清单...",
     worktree: true,
     output: "handoff/impl-a.md",
     outputMode: "file-only",
@@ -119,7 +159,7 @@ const impl = await runs.all([
     agent: "worker",
     phase: "Implementation",
     label: "实现 B",
-    task: "...明确 claimed files or contract；禁止 commit/push；返回 changed files、验证结果和 handoff 引用...",
+    task: "...原分支与原工作区、基线、claimed files or contract；禁止 commit/push 与自行合并清理；返回 changed files、验证结果、临时产物清单...",
     worktree: true,
     output: "handoff/impl-b.md",
     outputMode: "file-only",
@@ -130,9 +170,9 @@ return impl.map(({ key, runId, outputReference, artifactPaths }) => ({
 }));
 ```
 
-脚本返回 handoff 引用后，父代理在脚本外按“检查 lane → 顺序应用 patch → 解决冲突 →
-运行最终 LSP/构建/测试”的顺序收尾；只有最终代码已进入父代理当前工作区并通过验证，才能向
-用户报告实现完成。
+脚本返回 handoff 引用后，父代理在脚本外依次核实原分支、顺序应用 patch、解决冲突、
+运行最终 LSP/构建/测试、清理本次 worktree 与临时产物、复核原分支和残留路径；
+只有变更已合入原分支、验证与清理均完成，才能向用户报告实现完成。
 
 约束：
 
@@ -147,13 +187,12 @@ return impl.map(({ key, runId, outputReference, artifactPaths }) => ({
 ## 回收与汇总
 
 - 异步通道有原生完成通知；派发后让出控制权等 Pi 唤醒，不做无谓轮询。
-- 全部通道结束后：交叉核对结果、去重、仲裁冲突；对可写 lane，父代理必须先依据
-  `handoffPath` / `artifactPaths` 检查并把已接受的 patch 或变更整合进当前工作区，随后
-  执行最终 LSP 诊断、受影响范围的构建/测试和 diff 检查。修复与最终验收由**父代理**
-  执行；小规模收尾修改允许父代理直接做。
+- 全部通道结束后：父代理交叉核对、仲裁冲突，依据 runtime handoff/patch 将已接受
+  变更整合回启动前记录的原分支与原工作区，再执行最终 LSP、构建/测试及 diff 检查，
+  最后清理本次 worktree、临时分支和临时产物并复核。小规模收尾修改允许父代理直接做。
 - 审查类通道必须给出文件:行号证据；无证据的发现不采信。
-- 交付说明必须包含：通道计划与实际执行对照、各通道关键结果、代码回交/整合状态、
-  最终验证方式、残余风险；涉及文档同步时遵循全局 AGENTS.md 第 3 节。
+- 交付说明必须包含：通道计划与实际执行对照、各通道结果、原分支与合入状态、
+  最终验证结果、清理清单和残留路径/原因；涉及文档同步时遵循全局 AGENTS.md 第 3 节。
 
 ## 红线
 
