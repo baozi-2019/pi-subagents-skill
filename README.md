@@ -43,7 +43,10 @@ ln -s "$PWD/prompts/swarm.md" ~/.pi/agent/prompts/swarm.md
 ```
 
 输入 `/swarm` 即构成明确的委派授权：父代理**必须先输出通道计划**，把任务拆成
-2~4 条相互独立的子代理通道，再用一个 `workflowScript` + `runs.all` **并行派发**（默认异步）；
+2~4 条相互独立的子代理通道，再用一个 `workflowScript` + `runs.all` **并行派发**（默认异步）。
+派发前先调用 `subagent({action:"models"})` 获取模型注册表，并用 `ask_user_question` 按角色类别
+（侦察/实现/审查等）让用户为各类子代理选择模型（默认推荐继承会话模型；用户放弃或仅一个
+可用模型时全部继承会话模型），选择结果写入各派发条目的 `model` 字段并体现在通道计划中。
 可写通道必须按不重叠的文件/契约分片，多个并行 worker 使用独立 worktree。父代理启动前
 记录原工作区、原分支与 HEAD，跟踪本次创建的 worktree、临时分支及临时产物。子代理完成后，
 父代理通过 runtime handoff/patch 取得实际变更，按顺序合入**启动前所在的原分支**，

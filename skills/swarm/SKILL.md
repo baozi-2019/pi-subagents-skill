@@ -31,13 +31,35 @@ description: |
 3. 仅当任务**原子不可分**（如改一行配置、回答一个事实性问题）时才允许
    缩减为单子代理，且必须在交付说明中写明"不可分"的理由；禁止以"任务小"
    为由静默跳过 swarm 编排——任务小就不该用 `/swarm`，应提示用户直接下达。
-4. 派发前先输出**通道计划**再立即执行（无需等用户确认；仅当分解存在
-   实质性歧义时才先 `ask_user_question`）：
+4. 派发前先输出**通道计划**再立即执行（无需等用户确认；模型选择按上一节单独询问；
+   仅当分解存在实质性歧义时才额外先 `ask_user_question`）：
 
    | key | label | agent | 职责 | 读写边界 |
    | --- | --- | --- | --- | --- |
    | scout-auth | 调研鉴权模块 | scout | 梳理鉴权链路并输出问题清单 | 只读 |
    | scout-perm | 调研权限模型 | scout | 梳理权限模型与数据契约 | 只读 |
+
+## 模型选择：派发前询问用户
+
+子代理默认继承父代理会话模型。除注册表仅有一个可用模型外，**派发前必须**让用户按
+角色类别选择各类子代理使用的模型：
+
+1. 先调用 `subagent({action:"models"})` 获取当前会话的模型注册表与各类 agent 的默认
+   thinking 档（scout=low、researcher=medium、worker/reviewer=high）。选项必须使用注册表中的
+   精确 `provider/id`，不得凭记忆编造模型名。
+2. 用一次 `ask_user_question` 按角色类别提问（≤4 题）：侦察类（scout/researcher）、
+   实现类（worker/developer/coder 等）、审查类（reviewer/evidence-auditor）、其他类
+   （oracle/delegate 等，无此类通道时可省略该题）。每题选项：
+   - 第一项固定为"继承会话模型（推荐）"，保持现有行为；
+   - 其余选项从当前注册表动态挑选轻量档与强档代表模型各一，label 用简短名称，
+     description 写明完整 `provider/id`；用户还可在每题自动附带的"Type something"
+     输入精确 `provider/id`。
+3. 用户放弃问卷（Esc）或某题未选具体模型时，该类别回退为继承会话模型，不阻塞派发；
+   所选模型对该 agent 不可用（如外部 CLI 代理的 runner 声明了模型限制）时同样回退并说明。
+4. 选择结果按类别记入派发计划，并在 `workflowScript` 对应 `runs.run`/`runs.all` 条目上
+   写入 `model: "<provider/id>"`；不改动各类 agent 的默认 thinking 档，仅在确有需要时
+   以 `:low`/`:high` 等后缀覆盖。
+5. 通道计划必须包含各类别的模型选择，交付说明必须写明各类别实际生效的模型。
 
 ## 分解原则
 
@@ -182,7 +204,8 @@ return impl.map(({ key, runId, outputReference, artifactPaths }) => ({
   输出格式 / 停止与求助条件。子代理看不到父会话历史，任务包即其全部上下文。
 - **一个写者一个目录**：多条可写通道不得共用同一 cwd/worktree，用
   `worktree: true` 隔离或改为串行；只读通道无此限制。
-- 工作者/侦察走快而够用的模型档，正式审查走强模型档；父代理保持默认强模型。
+- 各条目的 `model` 取自模型选择环节用户为该类别的指定；未指定时继承会话模型，
+  保留各类 agent 的默认 thinking 档；父代理自身保持默认强模型。
 
 ## 回收与汇总
 
